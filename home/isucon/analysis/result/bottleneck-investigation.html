@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ISUCON14 ボトルネック調査結果</title>
+  <style>
+    :root{--bg:#f4f7fb;--panel:#fff;--ink:#172033;--muted:#5d687d;--line:#dce3ee;--blue:#175cd3;--blue2:#eaf2ff;--red:#b42318;--red2:#fff0ee;--amber:#9a6700;--amber2:#fff8dc;--green:#067647}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans JP",sans-serif;line-height:1.65}
+    main{width:min(1160px,calc(100% - 32px));margin:36px auto 72px} header,section{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 4px 18px #1720330d}
+    header{padding:32px 38px;border-top:5px solid var(--blue)} section{padding:26px 30px;margin-top:20px} h1{margin:0;font-size:clamp(1.7rem,4vw,2.35rem)} h2{margin:0 0 16px;font-size:1.35rem} h3{margin:24px 0 10px;font-size:1.05rem}
+    p{margin:9px 0}.lead,.note{color:var(--muted)} .meta{display:flex;gap:10px 24px;flex-wrap:wrap;margin-top:16px;color:var(--muted);font-size:.9rem}
+    .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:22px}.card{padding:15px;background:var(--blue2);border-radius:10px}.card strong{display:block;color:var(--blue);font-size:1.45rem}.card span{font-size:.85rem;color:var(--muted)}
+    .callout{padding:14px 16px;border-left:4px solid var(--blue);background:var(--blue2);margin:14px 0}.warn{border-color:var(--amber);background:var(--amber2)}
+    .table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:.9rem;margin:12px 0}th,td{padding:10px;border:1px solid var(--line);text-align:left;vertical-align:top}th{background:#f0f4f9;white-space:nowrap}tbody tr:nth-child(even){background:#fafbfd}
+    code{background:#eef1f6;padding:.12em .35em;border-radius:5px;font-family:Consolas,monospace}pre{overflow:auto;background:#111827;color:#f9fafb;padding:16px;border-radius:9px}pre code{background:none;padding:0}
+    .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-weight:700;font-size:.78rem;white-space:nowrap}.p0{color:var(--red);background:var(--red2)}.p1{color:var(--amber);background:var(--amber2)}.p2{color:var(--green);background:#e8f8f0}li+li{margin-top:6px}footer{text-align:center;color:var(--muted);font-size:.85rem;margin-top:22px}
+    @media(max-width:800px){main{width:min(100% - 18px,1160px);margin-top:16px}header,section{padding:21px 17px}.cards{grid-template-columns:repeat(2,1fr)}}
+  </style>
+</head>
+<body><main>
+  <header>
+    <h1>ISUCON14 ボトルネック調査結果</h1>
+    <p class="lead">MySQLスロークエリ、nginx集計ログ、Go実装、初期化スキーマを突き合わせた静的調査。</p>
+    <div class="meta"><span>調査日: 2026-10-04</span><span>対象DB: MySQL / isuride</span><span>実機操作・ビルド・ベンチマーク未実施</span></div>
+    <div class="cards">
+      <div class="card"><strong>83.8%</strong><span>DB上位6クエリの占有率</span></div>
+      <div class="card"><strong>94.25%</strong><span>上位5 API系統の時間占有率</span></div>
+      <div class="card"><strong>49.17M</strong><span>総 Rows examined</span></div>
+      <div class="card"><strong>0件</strong><span>5xxレスポンス</span></div>
+    </div>
+  </header>
+
+  <section>
+    <h2>結論</h2>
+    <div class="callout"><strong>最優先:</strong> 検索条件と並び順に合う二次インデックスを追加し、<code>GET /api/owner/chairs</code> が全椅子の位置履歴を集計する構造を直す。</div>
+    <p>DB実行時間372秒のうち上位6クエリで83.8%を占める。nginx側でも、通知2系統、座標更新、<code>owner/chairs</code>、<code>nearby-chairs</code> の5系統がAPI累積768.735秒中724.597秒を占める。両ログは、無索引検索とN+1が同じ主要因であることを示している。</p>
+    <ul>
+      <li><code>owner/chairs</code> は平均3.010秒、<code>nearby-chairs</code> は平均3.877秒。</li>
+      <li>通知2系統は6,248回、503.845秒で、API累積時間の65.54%。</li>
+      <li>4xxは32件。評価APIの4件は全て4xxかつ6.454～9.997秒だが、集計ログだけでは正確なコードと原因を判定できない。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>nginxアクセス集計</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>優先</th><th>エンドポイント</th><th>回数</th><th>累積</th><th>平均</th><th>P95</th><th>所見</th></tr></thead>
+      <tbody>
+        <tr><td><span class="tag p0">P0</span></td><td><code>GET /api/chair/notification</code></td><td>5,426</td><td>329.480秒</td><td>61ms</td><td>183ms</td><td>高頻度ポーリング。最新ライド・未通知状態・最新状態を毎回検索</td></tr>
+        <tr><td><span class="tag p0">P0</span></td><td><code>GET /api/app/notification</code></td><td>822</td><td>174.365秒</td><td>212ms</td><td>366ms</td><td>通知処理内で椅子統計のN+1を実行</td></tr>
+        <tr><td><span class="tag p0">P0</span></td><td><code>POST /api/chair/coordinate</code></td><td>639</td><td>92.951秒</td><td>145ms</td><td>231ms</td><td>状態参照と増え続ける位置履歴の影響</td></tr>
+        <tr><td><span class="tag p0">P0</span></td><td><code>GET /api/owner/chairs</code></td><td>27</td><td>81.272秒</td><td>3.010秒</td><td>3.814秒</td><td>全位置履歴へのウィンドウ関数</td></tr>
+        <tr><td><span class="tag p1">P1</span></td><td><code>GET /api/app/nearby-chairs</code></td><td>12</td><td>46.529秒</td><td>3.877秒</td><td>4.278秒</td><td>全椅子×ライド×状態×最新位置のN+1</td></tr>
+        <tr><td><span class="tag p2">確認</span></td><td><code>POST /api/app/rides/:id/evaluation</code></td><td>4</td><td>33.743秒</td><td>8.436秒</td><td>―</td><td>全件4xx。生ログでステータスコードを確認</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note">全9,627リクエスト中、APIは8,177件。API累積処理時間は768.735秒、4xxは32件、5xxは0件。動的なライドIDは <code>:id</code> に正規化した。</p>
+  </section>
+
+  <section>
+    <h2>MySQLスロークエリ</h2>
+    <p>対象期間: 2026-10-03 04:32:36～12:01:37。114.84kクエリ、125種類、合計372秒。</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>順位</th><th>内容</th><th>時間 / 割合</th><th>回数</th><th>平均</th><th>Rows examined/回</th><th>原因</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>椅子ごとの総移動距離</td><td>96.4秒 / 25.9%</td><td>32</td><td>3.013秒</td><td>約526</td><td>全位置履歴へ <code>LAG</code> 適用後にownerを絞る</td></tr>
+        <tr><td>2</td><td>ライド最新状態</td><td>76.0秒 / 20.4%</td><td>2,790</td><td>27ms</td><td>約4,420</td><td><code>ride_statuses</code> 全走査</td></tr>
+        <tr><td>3</td><td>椅子向け未通知状態</td><td>40.2秒 / 10.8%</td><td>1,149</td><td>35ms</td><td>約4,420</td><td><code>ride_statuses</code> 全走査</td></tr>
+        <tr><td>4</td><td>椅子の最新位置</td><td>37.5秒 / 10.1%</td><td>220</td><td>170ms</td><td>約20,730</td><td><code>chair_locations</code> 全走査</td></tr>
+        <tr><td>5</td><td>アプリ向け未通知状態</td><td>34.4秒 / 9.2%</td><td>974</td><td>35ms</td><td>約4,420</td><td><code>ride_statuses</code> 全走査</td></tr>
+        <tr><td>6</td><td>椅子統計の状態履歴</td><td>27.6秒 / 7.4%</td><td>799</td><td>35ms</td><td>約4,420</td><td>ライド単位のN+1</td></tr>
+        <tr><td>7</td><td>椅子の最新ライド</td><td>17.0秒 / 4.6%</td><td>6,890</td><td>2.5ms</td><td>約758</td><td><code>rides</code> 全走査</td></tr>
+        <tr><td>8</td><td>椅子認証</td><td>9.2秒 / 2.5%</td><td>6,927</td><td>1.3ms</td><td>520</td><td><code>chairs</code> 全走査</td></tr>
+        <tr><td>9</td><td><code>COMMIT</code></td><td>8.7秒 / 2.3%</td><td>2,922</td><td>3ms</td><td>―</td><td>小トランザクション多発</td></tr>
+        <tr><td>10</td><td>未割当ライド</td><td>7.6秒 / 2.0%</td><td>12,550</td><td>0.6ms</td><td>約750</td><td><code>rides</code> 全走査</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2>修正方針</h2>
+    <h3><span class="tag p0">P0</span> 複合インデックス</h3>
+    <pre><code>-- chairs
+UNIQUE KEY idx_chairs_access_token (access_token),
+KEY idx_chairs_owner_id (owner_id)
+
+-- chair_locations
+KEY idx_chair_locations_chair_id_created_at (chair_id, created_at)
+
+-- rides
+KEY idx_rides_chair_id_updated_at (chair_id, updated_at),
+KEY idx_rides_chair_id_created_at (chair_id, created_at),
+KEY idx_rides_user_id_created_at (user_id, created_at)
+
+-- ride_statuses
+KEY idx_ride_statuses_ride_id_created_at (ride_id, created_at)</code></pre>
+    <p><code>app_sent_at</code> と <code>chair_sent_at</code> は初手の索引に含めない。まず <code>ride_id</code> で最大6状態まで限定し、通知済み時刻更新による索引更新コストを避ける。</p>
+
+    <h3><span class="tag p0">P0</span> <code>owner/chairs</code> の集計範囲を限定</h3>
+    <p>先に対象オーナーの椅子を抽出し、その椅子の <code>chair_locations</code> だけへ <code>LAG</code> を適用する。</p>
+
+    <h3><span class="tag p0">P0</span> 通知処理のN+1を解消</h3>
+    <p><code>getChairStats</code> は椅子の全ライドを取得後、ライドごとに状態履歴を読む。完了ライド数と評価平均を単一集約SQLへ置き換える。ポーリング間隔30msの変更は原因修正と再計測の後に検討する。</p>
+
+    <h3><span class="tag p1">P1</span> <code>nearby-chairs</code> を一括取得</h3>
+    <p>アクティブな椅子、未完了ライドの有無、最新位置、マンハッタン距離を一括クエリで判定し、椅子数・ライド数に比例するSQLループをなくす。</p>
+
+    <h3><span class="tag p2">確認</span> 評価APIの4xx</h3>
+    <p>生アクセスログで <code>400/404/409/499</code> のどれかを特定し、アプリケーションログと突き合わせる。</p>
+  </section>
+
+  <section>
+    <h2>推奨実施順と再計測</h2>
+    <ol>
+      <li><code>1-schema.sql</code> にP0インデックスを追加。</li>
+      <li><code>owner/chairs</code> の距離集計を対象オーナーに限定。</li>
+      <li><code>getChairStats</code> を単一集約クエリへ変更。</li>
+      <li><code>nearby-chairs</code> のN+1を一括クエリへ変更。</li>
+      <li>許可された環境で再計測し、通知頻度、座標更新、評価APIを再評価。</li>
+    </ol>
+    <ul>
+      <li><code>EXPLAIN</code> で追加索引が使われ、Rows examinedが対象データ件数程度まで下がること。</li>
+      <li>レスポンスの距離、評価平均、近隣椅子の可用性判定が従来と一致すること。</li>
+      <li>通知状態が発生順に最低1回返ること。</li>
+      <li><code>owner/chairs</code>、<code>nearby-chairs</code> のP95と通知系の累積時間が低下すること。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>調査上の制約</h2>
+    <div class="callout warn">入力の <code>access.log</code> は生ログではなくURI別のalp形式集計表である。時系列相関、正確な4xxコード、upstream内訳は確認できない。</div>
+    <p><code>shiji.md</code> 記載のスロークエリパスにはファイルが存在しないため、実在する <code>home/isucon/analysis/db/slow-query-dump.log</code> を使用した。アプリケーションコードとスキーマは変更していない。</p>
+  </section>
+  <footer>Generated from local logs and source code by static analysis.</footer>
+</main></body>
+</html>
