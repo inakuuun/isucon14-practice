@@ -134,3 +134,9 @@ CREATE TABLE coupons
   PRIMARY KEY (user_id, code)
 )
   COMMENT 'クーポンテーブル';
+
+ALTER TABLE chairs
+  ADD INDEX idx_chairs_owner_id (owner_id);
+
+ALTER TABLE chair_locations
+  ADD INDEX idx_chair_locations_chair_id_created_at (chair_id, created_at);
