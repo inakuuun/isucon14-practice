@@ -54,6 +54,15 @@ func chairPostChairs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	// created_at / updated_at はDB側で採番されるため保持しない（認証後のハンドラーは ID のみ使用）
+	setChairByAccessToken(&Chair{
+		ID:          chairID,
+		OwnerID:     owner.ID,
+		Name:        req.Name,
+		Model:       req.Model,
+		IsActive:    false,
+		AccessToken: accessToken,
+	})
 
 	http.SetCookie(w, &http.Cookie{
 		Path:  "/",
@@ -86,6 +95,7 @@ func chairPostActivity(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	setChairIsActive(chair.ID, req.IsActive)
 
 	w.WriteHeader(http.StatusNoContent)
 }
