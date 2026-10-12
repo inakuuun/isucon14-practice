@@ -142,13 +142,7 @@ ON DUPLICATE KEY UPDATE
 		return
 	}
 
-	ride := &Ride{}
-	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-	} else {
+	if ride, ok := getChairLatestRide(chair.ID); ok {
 		status, err := getLatestRideStatus(ctx, tx, ride.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -212,18 +206,14 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	ride := &Ride{}
 	yetSentRideStatus := RideStatus{}
 	status := ""
 
-	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusOK, &chairGetNotificationResponse{
-				RetryAfterMs: chairNotificationRetryAfterMs,
-			})
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err)
+	ride, ok := getChairLatestRide(chair.ID)
+	if !ok {
+		writeJSON(w, http.StatusOK, &chairGetNotificationResponse{
+			RetryAfterMs: chairNotificationRetryAfterMs,
+		})
 		return
 	}
 
