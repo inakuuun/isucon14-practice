@@ -186,6 +186,9 @@ type simpleUser struct {
 	Name string `json:"name"`
 }
 
+// 通知のポーリング間隔。状態変化から3秒以内に通知でき、配車後の椅子の動き出しが遅れすぎない範囲で、ポーリング回数を抑える
+const chairNotificationRetryAfterMs = 200
+
 type chairGetNotificationResponse struct {
 	Data         *chairGetNotificationResponseData `json:"data"`
 	RetryAfterMs int                               `json:"retry_after_ms"`
@@ -216,7 +219,7 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeJSON(w, http.StatusOK, &chairGetNotificationResponse{
-				RetryAfterMs: 30,
+				RetryAfterMs: chairNotificationRetryAfterMs,
 			})
 			return
 		}
@@ -276,7 +279,7 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 			},
 			Status: status,
 		},
-		RetryAfterMs: 30,
+		RetryAfterMs: chairNotificationRetryAfterMs,
 	})
 }
 
