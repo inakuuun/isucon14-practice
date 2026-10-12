@@ -152,6 +152,8 @@ ON DUPLICATE KEY UPDATE
 		return
 	}
 
+	// コミット成功後にキャッシュへ反映する、このリクエストで追加した状態
+	var insertedRideID, insertedStatus string
 	if ride, ok := getChairLatestRide(chair.ID); ok {
 		status, err := getLatestRideStatus(ctx, tx, ride.ID)
 		if err != nil {
@@ -164,6 +166,7 @@ ON DUPLICATE KEY UPDATE
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
+				insertedRideID, insertedStatus = ride.ID, "PICKUP"
 			}
 
 			if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && status == "CARRYING" {
@@ -171,6 +174,7 @@ ON DUPLICATE KEY UPDATE
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
+				insertedRideID, insertedStatus = ride.ID, "ARRIVED"
 			}
 		}
 	}
@@ -178,6 +182,9 @@ ON DUPLICATE KEY UPDATE
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if insertedStatus != "" {
+		setRideLatestStatus(insertedRideID, insertedStatus)
 	}
 
 	writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
@@ -321,6 +328,8 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// コミット成功後にキャッシュへ反映する、このリクエストで追加した状態
+	insertedStatus := ""
 	switch req.Status {
 	// Acknowledge the ride
 	case "ENROUTE":
@@ -328,6 +337,7 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		insertedStatus = "ENROUTE"
 	// After Picking up user
 	case "CARRYING":
 		status, err := getLatestRideStatus(ctx, tx, ride.ID)
@@ -343,6 +353,7 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		insertedStatus = "CARRYING"
 	default:
 		writeError(w, http.StatusBadRequest, errors.New("invalid status"))
 	}
@@ -350,6 +361,9 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if insertedStatus != "" {
+		setRideLatestStatus(ride.ID, insertedStatus)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
