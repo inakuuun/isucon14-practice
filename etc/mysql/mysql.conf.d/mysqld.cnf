@@ -79,3 +79,7 @@ max_binlog_size   = 100M
 
 # バッファプールサイズの設定(free --humanの結果から計算)
 innodb_buffer_pool_size = 1800M
+
+# COMMIT時のfsyncを減らす(redo logのfsyncは約1秒ごと、binlogは無効化)
+innodb_flush_log_at_trx_commit = 2
+disable_log_bin
