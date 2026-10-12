@@ -127,6 +127,21 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// total_distance は直前位置との差分を加算するため、位置の更新より先に評価させる
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO chair_distances (chair_id, latitude, longitude, total_distance, total_distance_updated_at) VALUES (?, ?, ?, 0, ?)
+ON DUPLICATE KEY UPDATE
+  total_distance = total_distance + ABS(VALUES(latitude) - latitude) + ABS(VALUES(longitude) - longitude),
+  latitude = VALUES(latitude),
+  longitude = VALUES(longitude),
+  total_distance_updated_at = VALUES(total_distance_updated_at)`,
+		location.ChairID, location.Latitude, location.Longitude, location.CreatedAt,
+	); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
 	ride := &Ride{}
 	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
