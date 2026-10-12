@@ -79,5 +79,3 @@ max_binlog_size   = 100M
 
 # バッファプールサイズの設定(free --humanの結果から計算)
 innodb_buffer_pool_size = 1800M
-
-root@ip-172-31-14-117:/etc/mysql/mysql.conf.d#
