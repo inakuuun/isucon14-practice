@@ -763,57 +763,30 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 func getChairStats(ctx context.Context, tx *sqlx.Tx, chairID string) (appGetNotificationResponseChairStats, error) {
 	stats := appGetNotificationResponseChairStats{}
 
-	rides := []Ride{}
-	err := tx.SelectContext(
+	// ARRIVED・CARRYING・COMPLETED の状態をすべて持つライドの件数と評価の合計を集計する
+	// 平均はMySQLのAVG（DECIMALに丸められる）ではなく、従来どおりGoの浮動小数点で計算する
+	var result struct {
+		TotalRideCount  int `db:"total_ride_count"`
+		TotalEvaluation int `db:"total_evaluation"`
+	}
+	err := tx.GetContext(
 		ctx,
-		&rides,
-		`SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC`,
+		&result,
+		`SELECT COUNT(*) AS total_ride_count, IFNULL(SUM(evaluation), 0) AS total_evaluation
+FROM rides
+WHERE chair_id = ?
+  AND EXISTS (SELECT 1 FROM ride_statuses WHERE ride_statuses.ride_id = rides.id AND ride_statuses.status = 'ARRIVED')
+  AND EXISTS (SELECT 1 FROM ride_statuses WHERE ride_statuses.ride_id = rides.id AND ride_statuses.status = 'CARRYING')
+  AND EXISTS (SELECT 1 FROM ride_statuses WHERE ride_statuses.ride_id = rides.id AND ride_statuses.status = 'COMPLETED')`,
 		chairID,
 	)
 	if err != nil {
 		return stats, err
 	}
 
-	totalRideCount := 0
-	totalEvaluation := 0.0
-	for _, ride := range rides {
-		rideStatuses := []RideStatus{}
-		err = tx.SelectContext(
-			ctx,
-			&rideStatuses,
-			`SELECT * FROM ride_statuses WHERE ride_id = ? ORDER BY created_at`,
-			ride.ID,
-		)
-		if err != nil {
-			return stats, err
-		}
-
-		var arrivedAt, pickupedAt *time.Time
-		var isCompleted bool
-		for _, status := range rideStatuses {
-			if status.Status == "ARRIVED" {
-				arrivedAt = &status.CreatedAt
-			} else if status.Status == "CARRYING" {
-				pickupedAt = &status.CreatedAt
-			}
-			if status.Status == "COMPLETED" {
-				isCompleted = true
-			}
-		}
-		if arrivedAt == nil || pickupedAt == nil {
-			continue
-		}
-		if !isCompleted {
-			continue
-		}
-
-		totalRideCount++
-		totalEvaluation += float64(*ride.Evaluation)
-	}
-
-	stats.TotalRidesCount = totalRideCount
-	if totalRideCount > 0 {
-		stats.TotalEvaluationAvg = totalEvaluation / float64(totalRideCount)
+	stats.TotalRidesCount = result.TotalRideCount
+	if result.TotalRideCount > 0 {
+		stats.TotalEvaluationAvg = float64(result.TotalEvaluation) / float64(result.TotalRideCount)
 	}
 
 	return stats, nil
@@ -871,11 +844,33 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	chairs := []Chair{}
+	// 稼働中で、未完了のライドがなく（すべてのライドの最新状態が COMPLETED）、
+	// 最新位置が指定距離以内にある椅子を取得する
+	chairs := []struct {
+		ID        string `db:"id"`
+		Name      string `db:"name"`
+		Model     string `db:"model"`
+		Latitude  int    `db:"latitude"`
+		Longitude int    `db:"longitude"`
+	}{}
 	err = tx.SelectContext(
 		ctx,
 		&chairs,
-		`SELECT * FROM chairs`,
+		`SELECT chairs.id, chairs.name, chairs.model, latest_location.latitude, latest_location.longitude
+FROM chairs
+       JOIN LATERAL (SELECT latitude, longitude
+                     FROM chair_locations
+                     WHERE chair_locations.chair_id = chairs.id
+                     ORDER BY created_at DESC
+                     LIMIT 1) latest_location ON TRUE
+WHERE chairs.is_active = TRUE
+  AND ABS(latest_location.latitude - ?) + ABS(latest_location.longitude - ?) <= ?
+  AND NOT EXISTS (SELECT 1
+                  FROM rides
+                  WHERE rides.chair_id = chairs.id
+                    AND (SELECT status FROM ride_statuses WHERE ride_statuses.ride_id = rides.id ORDER BY created_at DESC LIMIT 1) <> 'COMPLETED')
+ORDER BY chairs.id`,
+		coordinate.Latitude, coordinate.Longitude, distance,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -884,60 +879,15 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 
 	nearbyChairs := []appGetNearbyChairsResponseChair{}
 	for _, chair := range chairs {
-		if !chair.IsActive {
-			continue
-		}
-
-		rides := []*Ride{}
-		if err := tx.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id = ? ORDER BY created_at DESC`, chair.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-
-		skip := false
-		for _, ride := range rides {
-			// 過去にライドが存在し、かつ、それが完了していない場合はスキップ
-			status, err := getLatestRideStatus(ctx, tx, ride.ID)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, err)
-				return
-			}
-			if status != "COMPLETED" {
-				skip = true
-				break
-			}
-		}
-		if skip {
-			continue
-		}
-
-		// 最新の位置情報を取得
-		chairLocation := &ChairLocation{}
-		err = tx.GetContext(
-			ctx,
-			chairLocation,
-			`SELECT * FROM chair_locations WHERE chair_id = ? ORDER BY created_at DESC LIMIT 1`,
-			chair.ID,
-		)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-
-		if calculateDistance(coordinate.Latitude, coordinate.Longitude, chairLocation.Latitude, chairLocation.Longitude) <= distance {
-			nearbyChairs = append(nearbyChairs, appGetNearbyChairsResponseChair{
-				ID:    chair.ID,
-				Name:  chair.Name,
-				Model: chair.Model,
-				CurrentCoordinate: Coordinate{
-					Latitude:  chairLocation.Latitude,
-					Longitude: chairLocation.Longitude,
-				},
-			})
-		}
+		nearbyChairs = append(nearbyChairs, appGetNearbyChairsResponseChair{
+			ID:    chair.ID,
+			Name:  chair.Name,
+			Model: chair.Model,
+			CurrentCoordinate: Coordinate{
+				Latitude:  chair.Latitude,
+				Longitude: chair.Longitude,
+			},
+		})
 	}
 
 	retrievedAt := &time.Time{}
