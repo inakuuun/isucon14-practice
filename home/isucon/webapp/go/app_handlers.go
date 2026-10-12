@@ -605,9 +605,8 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// 通知のポーリング間隔。未送信の状態を1回に1件ずつ返すため、間隔を延ばすと
-// ARRIVED の通知→評価→椅子の解放が遅れてマッチング待ちが伸びる。短く保つ
-const appNotificationRetryAfterMs = 30
+// 通知のポーリング間隔。状態変化から3秒以内に通知できる範囲で、ポーリング回数を抑える
+const appNotificationRetryAfterMs = 500
 
 type appGetNotificationResponse struct {
 	Data         *appGetNotificationResponseData `json:"data"`
