@@ -1,6 +1,6 @@
 ---
 name: issue-creator
-description: リポジトリの資料と実装を根拠に、実行可能な日本語GitHub Issueを作成・改善する。課題の優先付け、分割、下書き、登録に使用する。
+description: リポジトリの資料と実装を根拠に、実行可能な日本語GitHub Issueを作成・改善する。課題の優先付け、分割、下書き、登録に使用する。スロークエリログ（pt-query-digest）の上位SQLから順にIssueを作る場合にも使用する。
 ---
 
 # Issue作成
@@ -15,6 +15,14 @@ description: リポジトリの資料と実装を根拠に、実行可能な日�
 2. 関連する実装、設定、仕様、計測結果を確認し、事実と仮説を分ける。
 3. 効果、緊急度、実装範囲を基に優先順位を決め、独立した課題は分割する。
 4. [テンプレート](references/issue-template.md)を使い、背景、作業、完了条件、確認方法、対象外、根拠を書く。
+
+## スロークエリログからの作成
+
+ユーザーがスロークエリログ（既定: `home/isucon/analysis/db/slow-query-dump.log`）を示した場合や、DBのボトルネックからIssueを作る場合は、[スロークエリ手順](references/slow-query.md)に従う。
+
+- `# Profile` 表の Rank 1 から順に、1 Rank を1 Issueとして作成する。
+- 各IssueにはQuery ID、Response time、Calls、Rows examine、リテラルを `?` にしたSQL、発行元のGo関数とエンドポイントを書く。
+- 既存Issue・既存修正と重複するRankは作成せず、その旨を報告する。
 
 ## 原則
 
