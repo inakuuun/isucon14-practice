@@ -103,8 +103,7 @@ CREATE TABLE ride_statuses
   created_at      DATETIME(6)                                                                NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT '状態変更日時',
   app_sent_at     DATETIME(6)                                                                NULL COMMENT 'ユーザーへの状態通知日時',
   chair_sent_at   DATETIME(6)                                                                NULL COMMENT '椅子への状態通知日時',
-  PRIMARY KEY (id),
-  KEY idx_ride_statuses_ride_id_created_at (ride_id, created_at)
+  PRIMARY KEY (id)
 )
   COMMENT = 'ライドステータスの変更履歴テーブル';
 
@@ -135,3 +134,5 @@ CREATE TABLE coupons
   PRIMARY KEY (user_id, code)
 )
   COMMENT 'クーポンテーブル';
+
+ALTER TABLE ride_statuses ADD INDEX idx_ride_statuses_ride_id_created_at (ride_id, created_at);
