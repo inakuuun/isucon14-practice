@@ -139,6 +139,11 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := loadRideLatestStatuses(ctx); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
 	if err := loadChairsByAccessToken(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
