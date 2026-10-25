@@ -154,3 +154,4 @@ ALTER TABLE rides ADD INDEX idx_rides_chair_id_updated_at_desc (chair_id, update
 ALTER TABLE chairs ADD INDEX idx_chairs_access_token (access_token);
 ALTER TABLE rides ADD INDEX idx_rides_user_id_created_at_desc (user_id, created_at DESC);
 ALTER TABLE coupons ADD INDEX idx_coupons_used_by (used_by);
+ALTER TABLE coupons ADD INDEX idx_coupons_code (code);
