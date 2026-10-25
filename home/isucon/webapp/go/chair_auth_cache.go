@@ -66,3 +66,14 @@ func setChairIsActive(chairID string, isActive bool) {
 	updated.IsActive = isActive
 	chairsByAccessToken[accessToken] = &updated
 }
+
+// キャッシュ済みの全椅子を返す。返すスライスは呼び出し側で並べ替えてよい（要素の *Chair は書き換えない）
+func listCachedChairs() []*Chair {
+	chairsByAccessTokenMu.RLock()
+	defer chairsByAccessTokenMu.RUnlock()
+	chairs := make([]*Chair, 0, len(chairsByAccessToken))
+	for _, chair := range chairsByAccessToken {
+		chairs = append(chairs, chair)
+	}
+	return chairs
+}
