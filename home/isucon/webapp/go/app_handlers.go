@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -854,39 +855,17 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 
 	coordinate := Coordinate{Latitude: lat, Longitude: lon}
 
-	tx, err := db.Beginx()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer tx.Rollback()
-
-	// 稼働中で、未完了のライドがない（すべてのライドの最新状態が COMPLETED）椅子を取得する。
-	// 最新位置による絞り込みはキャッシュで行う
-	chairs := []struct {
-		ID    string `db:"id"`
-		Name  string `db:"name"`
-		Model string `db:"model"`
-	}{}
-	err = tx.SelectContext(
-		ctx,
-		&chairs,
-		`SELECT chairs.id, chairs.name, chairs.model
-FROM chairs
-WHERE chairs.is_active = TRUE
-  AND NOT EXISTS (SELECT 1
-                  FROM rides
-                  WHERE rides.chair_id = chairs.id
-                    AND (SELECT status FROM ride_statuses WHERE ride_statuses.ride_id = rides.id ORDER BY created_at DESC LIMIT 1) <> 'COMPLETED')
-ORDER BY chairs.id`,
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
+	// 稼働中で、未完了のライドがない椅子をキャッシュから判定する。
+	// マッチングは全ライドの通知が完了した椅子にのみ割り当てるため、未完了になり得るのは最新ライドだけであり、
+	// 「最新ライドがない、または最新ライドの最新状態が COMPLETED」で従来の NOT EXISTS と同じ結果になる
+	chairs := listCachedChairs()
+	sort.Slice(chairs, func(i, j int) bool { return chairs[i].ID < chairs[j].ID })
 
 	nearbyChairs := []appGetNearbyChairsResponseChair{}
 	for _, chair := range chairs {
+		if !chair.IsActive {
+			continue
+		}
 		// 座標未登録の椅子は従来の JOIN と同じく対象外とする
 		loc, ok := getChairLocation(chair.ID)
 		if !ok {
@@ -894,6 +873,16 @@ ORDER BY chairs.id`,
 		}
 		if calculateDistance(coordinate.Latitude, coordinate.Longitude, loc.Latitude, loc.Longitude) > distance {
 			continue
+		}
+		if ride, ok := getChairLatestRide(chair.ID); ok {
+			status, err := getLatestRideStatus(ctx, db, ride.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			if status != "COMPLETED" {
+				continue
+			}
 		}
 		nearbyChairs = append(nearbyChairs, appGetNearbyChairsResponseChair{
 			ID:    chair.ID,
@@ -906,20 +895,9 @@ ORDER BY chairs.id`,
 		})
 	}
 
-	retrievedAt := &time.Time{}
-	err = tx.GetContext(
-		ctx,
-		retrievedAt,
-		`SELECT CURRENT_TIMESTAMP(6)`,
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
 	writeJSON(w, http.StatusOK, &appGetNearbyChairsResponse{
 		Chairs:      nearbyChairs,
-		RetrievedAt: retrievedAt.UnixMilli(),
+		RetrievedAt: time.Now().UnixMilli(),
 	})
 }
 
