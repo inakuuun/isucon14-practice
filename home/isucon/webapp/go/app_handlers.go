@@ -328,6 +328,7 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 
 	user := ctx.Value("user").(*User)
 	rideID := ulid.Make().String()
+	rideStatusID := ulid.Make().String()
 
 	tx, err := db.Beginx()
 	if err != nil {
@@ -372,7 +373,7 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)`,
-		ulid.Make().String(), rideID, "MATCHING",
+		rideStatusID, rideID, "MATCHING",
 	); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -455,6 +456,7 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setRideLatestStatus(rideID, "MATCHING")
+	pushChairUnsentRideStatus(rideID, rideStatusID, "MATCHING")
 
 	writeJSON(w, http.StatusAccepted, &appPostRidesResponse{
 		RideID: rideID,
@@ -630,10 +632,11 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rideStatusID := ulid.Make().String()
 	_, err = tx.ExecContext(
 		ctx,
 		`INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)`,
-		ulid.Make().String(), rideID, "COMPLETED")
+		rideStatusID, rideID, "COMPLETED")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -653,6 +656,7 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setRideLatestStatus(rideID, "COMPLETED")
+	pushChairUnsentRideStatus(rideID, rideStatusID, "COMPLETED")
 
 	writeJSON(w, http.StatusOK, &appPostRideEvaluationResponse{
 		CompletedAt: ride.UpdatedAt.UnixMilli(),

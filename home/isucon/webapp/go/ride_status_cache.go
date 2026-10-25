@@ -92,3 +92,67 @@ func setRideCompletedSentToChair(rideID string) {
 	defer rideCompletedSentToChairMu.Unlock()
 	rideCompletedSentToChair[rideID] = struct{}{}
 }
+
+// 椅子へ未通知の状態（chair_sent_at IS NULL の ride_statuses）
+type chairUnsentRideStatus struct {
+	ID     string
+	Status string
+}
+
+// ライドID → 椅子へ未通知の状態のキュー（created_at の古い順）。
+// ride_statuses への INSERT のコミット成功後に末尾へ追加し、chair_sent_at の UPDATE のコミット成功後に先頭を取り除く。
+var (
+	chairUnsentRideStatusesMu sync.Mutex
+	chairUnsentRideStatuses   = map[string][]chairUnsentRideStatus{}
+)
+
+// 初期データから椅子へ未通知の状態を読み込み、キャッシュを作り直す
+func loadChairUnsentRideStatuses(ctx context.Context) error {
+	statuses := []RideStatus{}
+	if err := db.SelectContext(ctx, &statuses, `SELECT id, ride_id, status FROM ride_statuses WHERE chair_sent_at IS NULL ORDER BY created_at ASC`); err != nil {
+		return err
+	}
+
+	unsent := map[string][]chairUnsentRideStatus{}
+	for _, s := range statuses {
+		unsent[s.RideID] = append(unsent[s.RideID], chairUnsentRideStatus{ID: s.ID, Status: s.Status})
+	}
+
+	chairUnsentRideStatusesMu.Lock()
+	chairUnsentRideStatuses = unsent
+	chairUnsentRideStatusesMu.Unlock()
+	return nil
+}
+
+// 最も古い未通知の状態を返す
+func getChairUnsentRideStatus(rideID string) (chairUnsentRideStatus, bool) {
+	chairUnsentRideStatusesMu.Lock()
+	defer chairUnsentRideStatusesMu.Unlock()
+	queue := chairUnsentRideStatuses[rideID]
+	if len(queue) == 0 {
+		return chairUnsentRideStatus{}, false
+	}
+	return queue[0], true
+}
+
+func pushChairUnsentRideStatus(rideID string, id string, status string) {
+	chairUnsentRideStatusesMu.Lock()
+	defer chairUnsentRideStatusesMu.Unlock()
+	chairUnsentRideStatuses[rideID] = append(chairUnsentRideStatuses[rideID], chairUnsentRideStatus{ID: id, Status: status})
+}
+
+// 通知済みにした状態をキューの先頭から取り除く。
+// 同時に届いたポーリングで既に取り除かれている場合は何もしない
+func removeChairUnsentRideStatus(rideID string, id string) {
+	chairUnsentRideStatusesMu.Lock()
+	defer chairUnsentRideStatusesMu.Unlock()
+	queue := chairUnsentRideStatuses[rideID]
+	if len(queue) == 0 || queue[0].ID != id {
+		return
+	}
+	if len(queue) == 1 {
+		delete(chairUnsentRideStatuses, rideID)
+		return
+	}
+	chairUnsentRideStatuses[rideID] = queue[1:]
+}
