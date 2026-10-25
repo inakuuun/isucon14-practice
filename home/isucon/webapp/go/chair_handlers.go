@@ -231,6 +231,10 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	// COMPLETED が椅子に届いた時点で、その椅子はマッチングの対象になる
+	if yetSentRideStatus.Status == "COMPLETED" {
+		setRideCompletedSentToChair(ride.ID)
+	}
 
 	writeJSON(w, http.StatusOK, &chairGetNotificationResponse{
 		Data: &chairGetNotificationResponseData{

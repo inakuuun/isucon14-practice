@@ -144,6 +144,16 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := loadRideCompletedSentToChair(ctx); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	if err := loadChairModelSpeeds(ctx); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
 	if err := loadChairsByAccessToken(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
