@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -26,6 +27,14 @@ type appPostUsersResponse struct {
 	InvitationCode string `json:"invitation_code"`
 }
 
+// 招待コードごとのmutex（アプリは単一プロセスで動く前提）
+var invitationCodeMutexes sync.Map
+
+func invitationCodeMutex(code string) *sync.Mutex {
+	mu, _ := invitationCodeMutexes.LoadOrStore(code, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
+
 func appPostUsers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	req := &appPostUsersRequest{}
@@ -42,12 +51,47 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 	accessToken := secureRandomStr(32)
 	invitationCode := secureRandomStr(15)
 
+	useInvitation := req.InvitationCode != nil && *req.InvitationCode != ""
+	if useInvitation {
+		// 同じ招待コードでの登録を直列化し、利用回数の確認から付与までの間に他の登録が割り込まないようにする
+		mu := invitationCodeMutex(*req.InvitationCode)
+		mu.Lock()
+		defer mu.Unlock()
+	}
+
 	tx, err := db.Beginx()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	defer tx.Rollback()
+
+	// 招待コードを使った登録では、クーポンを付与する前に招待コードを確認する
+	var inviter User
+	if useInvitation {
+		// 招待する側の招待数をチェック
+		var coupons []Coupon
+		err = tx.SelectContext(ctx, &coupons, "SELECT * FROM coupons WHERE code = ? FOR UPDATE", "INV_"+*req.InvitationCode)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if len(coupons) >= 3 {
+			writeError(w, http.StatusBadRequest, errors.New("この招待コードは使用できません。"))
+			return
+		}
+
+		// ユーザーチェック
+		err = tx.GetContext(ctx, &inviter, "SELECT * FROM users WHERE invitation_code = ?", *req.InvitationCode)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusBadRequest, errors.New("この招待コードは使用できません。"))
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
 
 	_, err = tx.ExecContext(
 		ctx,
@@ -70,32 +114,7 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 招待コードを使った登録
-	if req.InvitationCode != nil && *req.InvitationCode != "" {
-		// 招待する側の招待数をチェック
-		var coupons []Coupon
-		err = tx.SelectContext(ctx, &coupons, "SELECT * FROM coupons WHERE code = ? FOR UPDATE", "INV_"+*req.InvitationCode)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		if len(coupons) >= 3 {
-			writeError(w, http.StatusBadRequest, errors.New("この招待コードは使用できません。"))
-			return
-		}
-
-		// ユーザーチェック
-		var inviter User
-		err = tx.GetContext(ctx, &inviter, "SELECT * FROM users WHERE invitation_code = ?", *req.InvitationCode)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				writeError(w, http.StatusBadRequest, errors.New("この招待コードは使用できません。"))
-				return
-			}
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-
+	if useInvitation {
 		// 招待クーポン付与
 		_, err = tx.ExecContext(
 			ctx,
@@ -369,14 +388,14 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 	var coupon Coupon
 	if rideCount == 1 {
 		// 初回利用で、初回利用クーポンがあれば必ず使う
-		if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND code = 'CP_NEW2024' AND used_by IS NULL FOR UPDATE", user.ID); err != nil {
+		if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons FORCE INDEX (PRIMARY) WHERE user_id = ? AND code = 'CP_NEW2024' AND used_by IS NULL FOR UPDATE", user.ID); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				writeError(w, http.StatusInternalServerError, err)
 				return
 			}
 
 			// 無ければ他のクーポンを付与された順番に使う
-			if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND used_by IS NULL ORDER BY created_at LIMIT 1 FOR UPDATE", user.ID); err != nil {
+			if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons FORCE INDEX (PRIMARY) WHERE user_id = ? AND used_by IS NULL ORDER BY created_at LIMIT 1 FOR UPDATE", user.ID); err != nil {
 				if !errors.Is(err, sql.ErrNoRows) {
 					writeError(w, http.StatusInternalServerError, err)
 					return
@@ -403,7 +422,7 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// 他のクーポンを付与された順番に使う
-		if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND used_by IS NULL ORDER BY created_at LIMIT 1 FOR UPDATE", user.ID); err != nil {
+		if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons FORCE INDEX (PRIMARY) WHERE user_id = ? AND used_by IS NULL ORDER BY created_at LIMIT 1 FOR UPDATE", user.ID); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				writeError(w, http.StatusInternalServerError, err)
 				return
