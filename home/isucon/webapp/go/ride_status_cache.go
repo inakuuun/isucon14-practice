@@ -54,3 +54,41 @@ func setRideLatestStatusIfAbsent(rideID string, status string) {
 		rideLatestStatuses[rideID] = status
 	}
 }
+
+// COMPLETED の通知が椅子に届いたライドIDの集合。
+// 椅子への通知は古い状態から順に送るため、COMPLETED が届いていればそのライドの全状態が通知済みとなる。
+var (
+	rideCompletedSentToChairMu sync.RWMutex
+	rideCompletedSentToChair   = map[string]struct{}{}
+)
+
+// 初期データから COMPLETED を椅子に通知済みのライドを読み込み、キャッシュを作り直す
+func loadRideCompletedSentToChair(ctx context.Context) error {
+	rideIDs := []string{}
+	if err := db.SelectContext(ctx, &rideIDs, `SELECT ride_id FROM ride_statuses WHERE status = 'COMPLETED' AND chair_sent_at IS NOT NULL`); err != nil {
+		return err
+	}
+
+	sent := make(map[string]struct{}, len(rideIDs))
+	for _, rideID := range rideIDs {
+		sent[rideID] = struct{}{}
+	}
+
+	rideCompletedSentToChairMu.Lock()
+	rideCompletedSentToChair = sent
+	rideCompletedSentToChairMu.Unlock()
+	return nil
+}
+
+func isRideCompletedSentToChair(rideID string) bool {
+	rideCompletedSentToChairMu.RLock()
+	defer rideCompletedSentToChairMu.RUnlock()
+	_, ok := rideCompletedSentToChair[rideID]
+	return ok
+}
+
+func setRideCompletedSentToChair(rideID string) {
+	rideCompletedSentToChairMu.Lock()
+	defer rideCompletedSentToChairMu.Unlock()
+	rideCompletedSentToChair[rideID] = struct{}{}
+}
