@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/oklog/ulid/v2"
 )
@@ -104,6 +105,14 @@ type chairPostCoordinateResponse struct {
 	RecordedAt int64 `json:"recorded_at"`
 }
 
+// total_distance は直前位置との差分を加算するため、位置の更新より先に評価させる
+const upsertChairDistanceQuery = `INSERT INTO chair_distances (chair_id, latitude, longitude, total_distance, total_distance_updated_at) VALUES (?, ?, ?, 0, ?)
+ON DUPLICATE KEY UPDATE
+  total_distance = total_distance + ABS(VALUES(latitude) - latitude) + ABS(VALUES(longitude) - longitude),
+  latitude = VALUES(latitude),
+  longitude = VALUES(longitude),
+  total_distance_updated_at = VALUES(total_distance_updated_at)`
+
 func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	req := &Coordinate{}
@@ -114,6 +123,40 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 
 	chair := ctx.Value("chair").(*Chair)
 
+	// 実行時に chair_locations を読む処理はないため、位置情報は chair_distances のみに記録する。
+	// 登録日時は DATETIME(6) に合わせてアプリ側で採番する
+	recordedAt := time.Now().Truncate(time.Microsecond)
+
+	// このリクエストで追加する状態。状態はキャッシュから判定できるため、書き込み前に決める
+	var insertedRideID, insertedStatus string
+	if ride, ok := getChairLatestRide(chair.ID); ok {
+		status, err := getLatestRideStatus(ctx, db, ride.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if status != "COMPLETED" && status != "CANCELED" {
+			if req.Latitude == ride.PickupLatitude && req.Longitude == ride.PickupLongitude && status == "ENROUTE" {
+				insertedRideID, insertedStatus = ride.ID, "PICKUP"
+			}
+			if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && status == "CARRYING" {
+				insertedRideID, insertedStatus = ride.ID, "ARRIVED"
+			}
+		}
+	}
+
+	// 状態遷移がなければトランザクションを張らず、UPSERT 1本で済ませる
+	if insertedStatus == "" {
+		if _, err := db.ExecContext(ctx, upsertChairDistanceQuery, chair.ID, req.Latitude, req.Longitude, recordedAt); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
+			RecordedAt: recordedAt.UnixMilli(),
+		})
+		return
+	}
+
 	tx, err := db.Beginx()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -121,74 +164,24 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	chairLocationID := ulid.Make().String()
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO chair_locations (id, chair_id, latitude, longitude) VALUES (?, ?, ?, ?)`,
-		chairLocationID, chair.ID, req.Latitude, req.Longitude,
-	); err != nil {
+	if _, err := tx.ExecContext(ctx, upsertChairDistanceQuery, chair.ID, req.Latitude, req.Longitude, recordedAt); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-
-	location := &ChairLocation{}
-	if err := tx.GetContext(ctx, location, `SELECT * FROM chair_locations WHERE id = ?`, chairLocationID); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), insertedRideID, insertedStatus); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-
-	// total_distance は直前位置との差分を加算するため、位置の更新より先に評価させる
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO chair_distances (chair_id, latitude, longitude, total_distance, total_distance_updated_at) VALUES (?, ?, ?, 0, ?)
-ON DUPLICATE KEY UPDATE
-  total_distance = total_distance + ABS(VALUES(latitude) - latitude) + ABS(VALUES(longitude) - longitude),
-  latitude = VALUES(latitude),
-  longitude = VALUES(longitude),
-  total_distance_updated_at = VALUES(total_distance_updated_at)`,
-		location.ChairID, location.Latitude, location.Longitude, location.CreatedAt,
-	); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	// コミット成功後にキャッシュへ反映する、このリクエストで追加した状態
-	var insertedRideID, insertedStatus string
-	if ride, ok := getChairLatestRide(chair.ID); ok {
-		status, err := getLatestRideStatus(ctx, tx, ride.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		if status != "COMPLETED" && status != "CANCELED" {
-			if req.Latitude == ride.PickupLatitude && req.Longitude == ride.PickupLongitude && status == "ENROUTE" {
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "PICKUP"); err != nil {
-					writeError(w, http.StatusInternalServerError, err)
-					return
-				}
-				insertedRideID, insertedStatus = ride.ID, "PICKUP"
-			}
-
-			if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && status == "CARRYING" {
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "ARRIVED"); err != nil {
-					writeError(w, http.StatusInternalServerError, err)
-					return
-				}
-				insertedRideID, insertedStatus = ride.ID, "ARRIVED"
-			}
-		}
 	}
 
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if insertedStatus != "" {
-		setRideLatestStatus(insertedRideID, insertedStatus)
-	}
+	// コミット成功後にキャッシュへ反映する
+	setRideLatestStatus(insertedRideID, insertedStatus)
 
 	writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
-		RecordedAt: location.CreatedAt.UnixMilli(),
+		RecordedAt: recordedAt.UnixMilli(),
 	})
 }
 

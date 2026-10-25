@@ -21,14 +21,6 @@ type ChairModel struct {
 	Speed int    `db:"speed"`
 }
 
-type ChairLocation struct {
-	ID        string    `db:"id"`
-	ChairID   string    `db:"chair_id"`
-	Latitude  int       `db:"latitude"`
-	Longitude int       `db:"longitude"`
-	CreatedAt time.Time `db:"created_at"`
-}
-
 type User struct {
 	ID             string    `db:"id"`
 	Username       string    `db:"username"`
