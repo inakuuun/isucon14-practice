@@ -271,10 +271,14 @@ type executableGet interface {
 }
 
 func getLatestRideStatus(ctx context.Context, tx executableGet, rideID string) (string, error) {
+	if status, ok := getRideLatestStatus(rideID); ok {
+		return status, nil
+	}
 	status := ""
 	if err := tx.GetContext(ctx, &status, `SELECT status FROM ride_statuses WHERE ride_id = ? ORDER BY created_at DESC LIMIT 1`, rideID); err != nil {
 		return "", err
 	}
+	setRideLatestStatusIfAbsent(rideID, status)
 	return status, nil
 }
 
@@ -418,6 +422,7 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	setRideLatestStatus(rideID, "MATCHING")
 
 	writeJSON(w, http.StatusAccepted, &appPostRidesResponse{
 		RideID: rideID,
@@ -599,6 +604,7 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	setRideLatestStatus(rideID, "COMPLETED")
 
 	writeJSON(w, http.StatusOK, &appPostRideEvaluationResponse{
 		CompletedAt: ride.UpdatedAt.UnixMilli(),
@@ -835,15 +841,11 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 	err = db.SelectContext(
 		ctx,
 		&chairs,
-		`SELECT chairs.id, chairs.name, chairs.model, latest_location.latitude, latest_location.longitude
+		`SELECT chairs.id, chairs.name, chairs.model, chair_distances.latitude, chair_distances.longitude
 FROM chairs
-       JOIN LATERAL (SELECT latitude, longitude
-                     FROM chair_locations
-                     WHERE chair_locations.chair_id = chairs.id
-                     ORDER BY created_at DESC
-                     LIMIT 1) latest_location ON TRUE
+       JOIN chair_distances ON chair_distances.chair_id = chairs.id
 WHERE chairs.is_active = TRUE
-  AND ABS(latest_location.latitude - ?) + ABS(latest_location.longitude - ?) <= ?
+  AND ABS(chair_distances.latitude - ?) + ABS(chair_distances.longitude - ?) <= ?
   AND NOT EXISTS (SELECT 1
                   FROM rides
                   WHERE rides.chair_id = chairs.id

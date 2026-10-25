@@ -54,6 +54,15 @@ func chairPostChairs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	// created_at / updated_at はDB側で採番されるため保持しない（認証後のハンドラーは ID のみ使用）
+	setChairByAccessToken(&Chair{
+		ID:          chairID,
+		OwnerID:     owner.ID,
+		Name:        req.Name,
+		Model:       req.Model,
+		IsActive:    false,
+		AccessToken: accessToken,
+	})
 
 	http.SetCookie(w, &http.Cookie{
 		Path:  "/",
@@ -86,6 +95,7 @@ func chairPostActivity(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	setChairIsActive(chair.ID, req.IsActive)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -127,13 +137,24 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ride := &Ride{}
-	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-	} else {
+	// total_distance は直前位置との差分を加算するため、位置の更新より先に評価させる
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO chair_distances (chair_id, latitude, longitude, total_distance, total_distance_updated_at) VALUES (?, ?, ?, 0, ?)
+ON DUPLICATE KEY UPDATE
+  total_distance = total_distance + ABS(VALUES(latitude) - latitude) + ABS(VALUES(longitude) - longitude),
+  latitude = VALUES(latitude),
+  longitude = VALUES(longitude),
+  total_distance_updated_at = VALUES(total_distance_updated_at)`,
+		location.ChairID, location.Latitude, location.Longitude, location.CreatedAt,
+	); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// コミット成功後にキャッシュへ反映する、このリクエストで追加した状態
+	var insertedRideID, insertedStatus string
+	if ride, ok := getChairLatestRide(chair.ID); ok {
 		status, err := getLatestRideStatus(ctx, tx, ride.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -145,6 +166,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
+				insertedRideID, insertedStatus = ride.ID, "PICKUP"
 			}
 
 			if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && status == "CARRYING" {
@@ -152,6 +174,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
+				insertedRideID, insertedStatus = ride.ID, "ARRIVED"
 			}
 		}
 	}
@@ -159,6 +182,9 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if insertedStatus != "" {
+		setRideLatestStatus(insertedRideID, insertedStatus)
 	}
 
 	writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
@@ -170,6 +196,9 @@ type simpleUser struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 }
+
+// 通知のポーリング間隔。状態変化から3秒以内に通知でき、配車後の椅子の動き出しが遅れすぎない範囲で、ポーリング回数を抑える
+const chairNotificationRetryAfterMs = 200
 
 type chairGetNotificationResponse struct {
 	Data         *chairGetNotificationResponseData `json:"data"`
@@ -188,18 +217,14 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	chair := ctx.Value("chair").(*Chair)
 
-	ride := &Ride{}
 	yetSentRideStatus := RideStatus{}
 	status := ""
 
-	if err := db.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusOK, &chairGetNotificationResponse{
-				RetryAfterMs: 30,
-			})
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err)
+	ride, ok := getChairLatestRide(chair.ID)
+	if !ok {
+		writeJSON(w, http.StatusOK, &chairGetNotificationResponse{
+			RetryAfterMs: chairNotificationRetryAfterMs,
+		})
 		return
 	}
 
@@ -250,7 +275,7 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 			},
 			Status: status,
 		},
-		RetryAfterMs: 30,
+		RetryAfterMs: chairNotificationRetryAfterMs,
 	})
 }
 
@@ -292,6 +317,8 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// コミット成功後にキャッシュへ反映する、このリクエストで追加した状態
+	insertedStatus := ""
 	switch req.Status {
 	// Acknowledge the ride
 	case "ENROUTE":
@@ -299,6 +326,7 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		insertedStatus = "ENROUTE"
 	// After Picking up user
 	case "CARRYING":
 		status, err := getLatestRideStatus(ctx, tx, ride.ID)
@@ -314,6 +342,7 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		insertedStatus = "CARRYING"
 	default:
 		writeError(w, http.StatusBadRequest, errors.New("invalid status"))
 	}
@@ -321,6 +350,9 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if insertedStatus != "" {
+		setRideLatestStatus(ride.ID, insertedStatus)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
